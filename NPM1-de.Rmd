@@ -1,0 +1,396 @@
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+options(warn = - 1)  
+
+library(Signac)
+library(Seurat)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggrepel)
+library(annotate)
+library(dplyr)  
+library(limma)    
+library(edgeR)  
+library(WriteXLS)
+library(pheatmap) 
+library(ggplot2)
+library(EGSEA)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library("pathview")
+library(goseq)
+library(tidyverse)
+library(statmod)
+library(KEGGREST)
+library(gprofiler2)
+library(wordcloud)
+set.seed(1234)
+```
+
+
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+# https://satijalab.org/signac/articles/pbmc_multiomic.html
+counts <- Read10X_h5("filtered_feature_bc_matrix.h5")
+fragpath <- "atac_fragments.tsv.gz"
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+
+# get gene annotations for hg38
+
+annotation <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+genome(annotation) <- "hg38"
+seqlevelsStyle(annotation) <- "UCSC"
+
+
+# seqlevelsStyle(annotation) <- "Ensembl"
+
+# create a Seurat object containing the RNA adata
+
+npm1 <- CreateSeuratObject(
+        counts = counts$`Gene Expression`,
+        assay = "RNA"
+)
+
+# npm1[["percent.mt"]] <- PercentageFeatureSet(npm1, pattern = "^MT-")
+# 
+# # create ATAC assay and add it to the object
+# 
+# npm1[["ATAC"]] <- CreateChromatinAssay(
+#         counts = counts$Peaks,
+#         sep = c(":", "-"),
+#         fragments = fragpath,
+#         annotation = annotation
+# 
+# )
+
+```
+
+```{r}
+DefaultAssay(npm1) <- "RNA"
+
+
+VlnPlot(
+  object = npm1,
+  features = c("nCount_RNA"),
+  ncol = 4,
+  pt.size = 0
+)
+```
+
+```{r}
+npm1 <- subset(
+  x = npm1,
+  subset = nCount_RNA < 7500
+)
+
+VlnPlot(
+  object = npm1,
+  features = c("nCount_RNA"),
+  ncol = 4,
+  pt.size = 0
+)
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#npm1 <- SCTransform(npm1) %>% RunPCA() %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+npm1 <- SCTransform(npm1)
+npm1 <- RunPCA(npm1)
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#Add cell labels from the previously generated scRNA annotation
+#reference <- readRDS("~/Documents/Research/NPM1-AML/NPM1_seurat/NPM1_seurat.rds")
+reference <- readRDS("~/Downloads/namlab/NPM1_seurat/NPM1_seurat.rds")
+
+npm1 <- AddMetaData(
+        object = npm1,
+        metadata = reference@meta.data %>% select(Cell.Ident_Mutation.Status) %>% filter(rownames(.) %in% BiocGenerics::intersect(rownames(npm1@meta.data), rownames(reference@meta.data))))
+
+Idents(npm1) <- "Cell.Ident_Mutation.Status"
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+DefaultAssay(npm1) <- "SCT"
+stem_cell_markers_1 <- FindMarkers(npm1, ident.1 = "HSC1_WT", ident.2 = "HSC2_MUT", only.pos = FALSE) %>% arrange(desc(avg_log2FC))
+#stem_cell_markers_2 <- FindMarkers(npm1, ident.1 = "HSC2_MUT", ident.2 = "HSC1_MUT", only.pos = FALSE) %>% arrange(desc(avg_log2FC))
+#monocytic_markers <- FindMarkers(npm1, ident.1 = "Monocytic_MUT", ident.2 = "Monocytic_WT", only.pos = FALSE) %>% arrange(desc(avg_log2FC))
+```
+
+GSEA from g:Profiler. List of genes was mapped to GO terms.
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+gostres <- gost(query = rownames(stem_cell_markers_1), organism = "hsapiens")
+gostplot(gostres, capped = FALSE, interactive = TRUE)
+```
+Prepare input
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+original_gene_list <- stem_cell_markers_1$avg_log2FC
+names(original_gene_list) <- rownames(stem_cell_markers_1)
+gene_list<-na.omit(original_gene_list)
+gene_list = sort(gene_list, decreasing = TRUE)
+```
+
+Volcano plot
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#de_mono = monocytic_markers
+de_hsc = stem_cell_markers_1
+# de_hsc = monocytic_markers
+
+Name2 = "HSC1_WT vs. HSC2_MUT"
+
+de_hsc$threshold <- as.factor(ifelse(de_hsc$p_val_adj < 0.05 & abs(de_hsc$avg_log2FC) >= 0.25, ifelse(de_hsc$avg_log2FC> 0.25 ,'Up','Down'),'NoSignifi'))
+
+ggplot(data=de_hsc, aes(x=avg_log2FC, y=-log10(p_val_adj), colour=threshold)) +
+geom_point(alpha=1, size=1.5) +
+scale_color_manual(values=c("green", "red", "grey")) +
+xlim(c(-4.5, 4.5)) +
+geom_vline(xintercept=c(-.25, .25), lty=4,col="black",lwd=0.8) +
+geom_hline(yintercept=-log10(0.05), lty=4,col="black",lwd=0.8) +
+annotate("text", x=c(-1.2, 1.2), y=1.8, label=c("-1", "1")) +
+annotate("text", x=-4, y=1.8, label="-log10(0.05)") +
+labs(x="log2(fold change)", y="-log10 (p-value)", title=Name2) +
+theme(plot.title=element_text(hjust=0.5), legend.position="right", legend.title=element_blank(
+))
+
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+GO.title <- paste(Name2,"GO", collapse = " ")
+KEGG.title <- paste(Name2,"KEGG", collapse = " ")
+```
+
+Convert gene symbols to ENTREZ IDs and add to dataframe.
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+symbols = rownames(de_hsc)
+entrez = mapIds(org.Hs.eg.db, symbols, 'ENTREZID', 'SYMBOL')
+de_hsc$entrezgene_id = entrez
+```
+
+Remove genes with NA IDs and sort the resulting vector.
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+# logFC <- de_hsc$avg_log2FC
+# names(logFC) <- de_hsc$entrezgene_id
+# logFC <- logFC[na.exclude(names(logFC))]
+# logFC <- sort(logFC, decreasing = T)
+```
+
+GSEA
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+gse <- gseGO(geneList=gene_list, 
+             ont ="ALL", 
+             keyType = "SYMBOL", 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "none")
+```
+
+Dot plot
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+require(DOSE)
+dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+```
+
+Enrichment map.
+Enriched GO terms are organized into a network with edges connecting overlapping gene sets. 
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+x2 <- pairwise_termsim(gse)
+emapplot(x2, showCategory = 10)
+```
+Network of links between genes and GO terms. Top five GO terms are shown.
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+cnetplot(gse, categorySize="pvalue", foldChange=gene_list, showCategory = 5)
+```
+Ridge plot (frequency of fold values per gene within each set)
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+ridgeplot(gse) + labs(x = "enrichment distribution")
+```
+GSEA plot
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#gseaplot(gse, by = "all", title = gse$Description[3], geneSetID = 3)
+gseaplot2(gse, geneSetID=1:10, title = GO.title)
+```
+
+
+# KEGG GSEA
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+ids<-bitr(names(original_gene_list), fromType = "SYMBOL", toType = "ENTREZID", OrgDb=org.Hs.eg.db)
+
+dedup_ids = ids[!duplicated(ids[c("SYMBOL")]),]
+
+df2 = stem_cell_markers_1[rownames(stem_cell_markers_1) %in% dedup_ids$SYMBOL,]
+
+df2$Y = dedup_ids$ENTREZID
+kegg_gene_list <- df2$avg_log2FC
+
+names(kegg_gene_list) <- df2$Y
+
+kegg_gene_list<-na.omit(kegg_gene_list)
+
+kegg_gene_list = sort(kegg_gene_list, decreasing = TRUE)
+```
+
+Create gseKEGG object
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+kegg_organism = "hsa"
+kk2 <- gseKEGG(geneList     = kegg_gene_list,
+               organism     = kegg_organism,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "none",
+               keyType       = "ncbi-geneid")
+```
+
+Dot plot 
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+dotplot(kk2, showCategory = 10, title = "Enriched Pathways" , split=".sign") + facet_grid(.~.sign)
+```
+Enrichment map
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+x3 <- pairwise_termsim(kk2)
+emapplot(x3)
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+cnetplot(kk2, categorySize="pvalue", foldChange=gene_list)
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+ridgeplot(kk2) + labs(x = "enrichment distribution")
+```
+GSEA plot (KEGG)
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#gseaplot(kk2, by = "all", title = kk2$Description[1], geneSetID = 1)
+#gseaplot2(kk2, geneSetID=1:10, title = KEGG.title)
+gseaplot2(kk2, geneSetID=1:5, title = KEGG.title)
+```
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+hsa_path <- pathview(gene.data=kegg_gene_list, pathway.id="hsa05222", species = kegg_organism)
+knitr::include_graphics("hsa05222.pathview.png")
+knitr::include_graphics("hsa05222.png")
+```
+
+# ORA
+
+Create enrichGO object
+
+```{r include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+
+#geneName2 <- de_hsc$entrezgene_id[abs(de_hsc$avg_log2FC) > 0.25 & de_hsc$p_val_adj<0.05]
+geneName2 <- de_hsc$entrezgene_id#[de_hsc$p_val_adj<0.05]
+geneName2 <- na.exclude(geneName2)
+# de_hsc$logFC = de_hsc$avg_log2FC
+# de_hsc$adj.P.Val = de_hsc$p_val_adj
+
+df = as.data.frame(org.Hs.egGO)
+go_gene_list = unique(sort(df$gene_id))
+
+length(geneName2)
+
+
+go_enrich <- enrichGO(gene    = geneName2,
+                universe      = go_gene_list,
+                OrgDb         = org.Hs.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+#head(ego2)
+#length(ego2$ID)
+
+dotplot(go_enrich, showCategory=15) + ggtitle("GO enrichment")
+```
+
+Upset plot: emphasize genes overlapping among different gene sets.
+
+```{r}
+upsetplot(go_enrich)
+```
+
+```{r}
+wcdf<-read.table(text=go_enrich$GeneRatio, sep = "/")[1]
+wcdf$term<-go_enrich[,2]
+wordcloud(words = wcdf$term, freq = wcdf$V1, scale=(c(1, .05)), colors=brewer.pal(8, "Dark2"), max.words = 25)
+```
+
+```{r}
+barplot(go_enrich, 
+        drop = TRUE, 
+        showCategory = 10, 
+        title = "GO Biological Pathways",
+        font.size = 8)
+```
+
+```{r}
+dotplot(go_enrich)
+```
+
+Enrichment plot
+
+```{r}
+x4 <- pairwise_termsim(go_enrich)
+emapplot(x4)
+```
+
+```{r}
+goplot(go_enrich, showCategory = 10)
+```
+
+```{r}
+cnetplot(go_enrich, categorySize="pvalue", foldChange=gene_list)
+```
+
+
+KEGG pathway enrichment
+
+```{r}
+ids<-bitr(names(original_gene_list), fromType = "SYMBOL", toType = "ENTREZID", OrgDb=org.Hs.eg.db)
+
+dedup_ids = ids[!duplicated(ids[c("SYMBOL")]),]
+
+df2 = stem_cell_markers_1[rownames(stem_cell_markers_1) %in% dedup_ids$SYMBOL,]
+
+df2$Y = dedup_ids$ENTREZID
+kegg_gene_list <- df2$avg_log2FC
+
+names(kegg_gene_list) <- df2$Y
+
+kegg_gene_list<-na.omit(kegg_gene_list)
+
+kegg_gene_list = sort(kegg_gene_list, decreasing = TRUE)
+
+kegg_sig_genes_df = subset(df2, p_val < 0.05)
+
+kegg_genes <- kegg_sig_genes_df$avg_log2FC
+
+#names(kegg_genes) <- kegg_sig_genes_df2$Y
+names(kegg_genes) <- rownames(kegg_sig_genes_df)
+
+kegg_genes <- na.omit(kegg_genes)
+```
